@@ -47,6 +47,14 @@ python3 -m phpatchscan https://your-site.com
 Output is one JSON object per URL: the verdict, the disclosed PHP
 version and where it was disclosed, and CMS fingerprints.
 
+Exit codes (for scripts and CI): **0** — scanned, no actionable
+finding; **1** — at least one target is `vulnerable`,
+`possibly_vulnerable`, or on an end-of-life branch; **2** — usage
+error, or a target could not be judged at all: unreachable, or
+`not_assessed` (its PHP branch is newer than the advisory
+database, so the scanner cannot judge it). With several targets,
+the worst code wins.
+
 Prefer a browser? The same scan runs free at
 [phpatch.com](https://phpatch.com) and includes a PDF report.
 

@@ -15,13 +15,13 @@ import ipaddress
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.parse
 
 from . import versioning
 
-_UA = ("phpatchscan/1.4.4 (+https://phpatch.com/security; "
-       "free vulnerability scan)")
+_UA = "phpatchscan/1.4.4 (+https://phpatch.com/security)"
 _TIMEOUT = 12
 _MAX_BODY = 512 * 1024
 _MAX_REDIRECTS = 5
@@ -149,23 +149,55 @@ def _preflight(url):
 
 
 _DEADLINE = 25  # total seconds allowed for one response body
-_TOTAL_DEADLINE = 40  # total seconds for one whole fetch, all hops
+_TOTAL_DEADLINE = 40  # total seconds for one whole SCAN: the
+# homepage fetch and every probe share this single budget
 
 
-def _read_capped(resp, budget=None):
+def _kill_conn(conn):
+    """Watchdog action at the total deadline: shut the socket down
+    so any blocked read (header or body) fails at once. A per-read
+    socket timeout alone cannot bound a slow drip — every byte
+    that arrives inside the timeout re-arms the wait — so the
+    deadline is enforced by killing the connection, not by hoping
+    the reads notice the clock."""
+    try:
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _read_capped(resp, budget=None, sock=None):
     """Read a response body up to _MAX_BODY bytes under a TOTAL
     deadline, so a slow-drip server cannot hold the scanner open
     one byte at a time under the per-read socket timeout. The cap
     applies to the raw bytes as received; the scanner never
     decompresses, so a compressed bomb never expands. `budget`
     (seconds remaining in the fetch's total deadline) can only
-    shorten the read, never extend it past _DEADLINE."""
+    shorten the read, never extend it past _DEADLINE. When `sock`
+    is given, its timeout is recomputed from the remaining budget
+    before every chunk read, so no single read can wait past the
+    deadline either."""
     chunks, got = [], 0
     secs = _DEADLINE if budget is None else min(_DEADLINE, budget)
     end = time.monotonic() + secs
     while got <= _MAX_BODY:
-        if time.monotonic() > end:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
             break
+        if sock is not None:
+            try:
+                sock.settimeout(max(0.1, min(_TIMEOUT, remaining)))
+            except Exception:
+                pass
         try:
             chunk = resp.read(min(65536, _MAX_BODY + 1 - got))
         except http.client.IncompleteRead as e:
@@ -191,16 +223,24 @@ def _headers_dict(resp):
     return out
 
 
-def _fetch(url, ctx=None):
+def _fetch(url, ctx=None, deadline=None):
     """Guarded fetch: http/https only, ports 80/443 only, no URL
     credentials, every redirect hop re-validated and IP-pinned,
     body capped, and a TOTAL deadline across connect + headers +
     body + all hops, so a slow-drip server cannot hold a worker
-    open. When a host resolves to several public IPs, each is
-    tried in turn on connection-level failures. Returns the same
-    dict shape as before."""
+    open. `deadline` (a time.monotonic() timestamp) lets the
+    caller share ONE budget across a whole scan — homepage plus
+    all probes — instead of granting each fetch its own; without
+    it, the fetch gets _TOTAL_DEADLINE to itself. The deadline is
+    enforced by a watchdog that kills the socket at the deadline:
+    per-read socket timeouts alone cannot stop a drip, because
+    each byte that arrives inside the timeout re-arms the wait.
+    When a host resolves to several public IPs, each is tried in
+    turn on connection-level failures. Returns the same dict
+    shape as before."""
     current = url
-    end = time.monotonic() + _TOTAL_DEADLINE
+    end = deadline if deadline is not None else \
+        time.monotonic() + _TOTAL_DEADLINE
     for _hop in range(_MAX_REDIRECTS + 1):
         err, parts, port = _preflight(current)
         if err:
@@ -228,6 +268,7 @@ def _fetch(url, ctx=None):
                                  f"({_TOTAL_DEADLINE}s) exceeded"}
             timeout = max(1.0, min(_TIMEOUT, remaining))
             conn = None
+            watchdog = None
             try:
                 if parts.scheme == "https":
                     conn = _PinnedHTTPS(ip, port, host, timeout)
@@ -239,6 +280,12 @@ def _fetch(url, ctx=None):
                                       "Host": host_hdr,
                                       "Accept": "*/*",
                                       "Connection": "close"})
+                if getattr(conn, "sock", None) is not None:
+                    watchdog = threading.Timer(
+                        max(0.0, end - time.monotonic()),
+                        _kill_conn, args=(conn,))
+                    watchdog.daemon = True
+                    watchdog.start()
                 resp = conn.getresponse()
                 status = resp.status
                 headers = _headers_dict(resp)
@@ -250,7 +297,8 @@ def _fetch(url, ctx=None):
                     current = urllib.parse.urljoin(current, location)
                     redirected = True
                     break
-                raw = _read_capped(resp, end - time.monotonic())
+                raw = _read_capped(resp, end - time.monotonic(),
+                                   sock=getattr(conn, "sock", None))
                 body = raw.decode("utf-8", "replace")
                 return {"ok": status < 400, "status": status,
                         "final_url": current, "headers": headers,
@@ -260,11 +308,18 @@ def _fetch(url, ctx=None):
             except Exception as e:  # DNS, TLS, timeout, refused
                 last_err = e
             finally:
+                if watchdog is not None:
+                    watchdog.cancel()
                 if conn is not None:
                     try:
                         conn.close()
                     except Exception:
                         pass
+        if time.monotonic() >= end:
+            return {"ok": False, "status": None,
+                    "final_url": current, "headers": {}, "body": "",
+                    "error": "scan timed out: total deadline "
+                             f"({_TOTAL_DEADLINE}s) exceeded"}
         if redirected:
             continue
         return {"ok": False, "status": None, "final_url": current,
@@ -285,7 +340,11 @@ def _h(headers, name):
 def scan(url):
     if not re.match(r"^https?://", url):
         url = "https://" + url
-    home = _fetch(url)
+    # One deadline for the WHOLE scan: the homepage fetch and all
+    # four phpinfo probes draw from the same _TOTAL_DEADLINE
+    # budget, so a scan can never run ~5x the deadline.
+    end = time.monotonic() + _TOTAL_DEADLINE
+    home = _fetch(url, deadline=end)
     result = {"target": url, "reachable": home["ok"],
               "http_status": home["status"], "final_url": home["final_url"],
               "error": home.get("error"), "signals": {},
@@ -348,7 +407,7 @@ def scan(url):
     _fp = urllib.parse.urlsplit(home["final_url"])
     base = f"{_fp.scheme}://{_fp.netloc}"
     for path in _PHPINFO_PATHS:
-        probe = _fetch(base + path)
+        probe = _fetch(base + path, deadline=end)
         b = probe["body"]
         if probe["status"] == 200 and "phpinfo()" in b and \
                 re.search(r"PHP Version\s*&?#?\w*\s*([0-9]+\.[0-9]+\.[0-9]+)", b):

@@ -1,0 +1,8 @@
+# Keep the SHA-pinned GitHub Actions in the CI workflow current:
+# Dependabot opens PRs that bump both the tag and the pinned SHA.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

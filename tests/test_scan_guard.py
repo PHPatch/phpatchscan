@@ -7,10 +7,15 @@ Run: python3 -m unittest discover -s tests
 """
 
 import gzip
+import io
 import socket
+import threading
+import time
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
+from phpatchscan import __main__ as cli
 from phpatchscan import scan, versioning
 
 PUBLIC = "93.184.216.34"
@@ -333,7 +338,7 @@ class ScanFixtures(unittest.TestCase):
     def test_header_version_verdict(self):
         calls = []
 
-        def fake_fetch(url, ctx=None):
+        def fake_fetch(url, ctx=None, deadline=None):
             calls.append(url)
             if len(calls) == 1:
                 return self._home(
@@ -349,7 +354,7 @@ class ScanFixtures(unittest.TestCase):
     def test_probes_built_from_origin_not_final_path(self):
         calls = []
 
-        def fake_fetch(url, ctx=None):
+        def fake_fetch(url, ctx=None, deadline=None):
             calls.append(url)
             if len(calls) == 1:
                 return self._home(
@@ -369,7 +374,7 @@ class ScanFixtures(unittest.TestCase):
         body = ("<html><title>phpinfo()</title>"
                 "PHP Version 8.3.35</html>")
 
-        def fake_fetch(url, ctx=None):
+        def fake_fetch(url, ctx=None, deadline=None):
             if "phpinfo.php" in url:
                 return self._home(body=body)
             return self._home()
@@ -439,6 +444,171 @@ class FetchBehavior(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertLessEqual(seen["timeout"], 3)
         self.assertIn("timed out", r["error"])
+
+
+class BlockedRangesExplicit(unittest.TestCase):
+    """The two addresses the round-4 review named explicitly: a
+    CGNAT address deep inside 100.64.0.0/10 and the deprecated
+    6to4 relay anycast 192.88.99.1. Each is refused by policy and
+    no connection is attempted."""
+
+    def _refused(self, url):
+        boom = mock.Mock(side_effect=AssertionError("connect tried"))
+        with mock.patch.object(scan.socket, "getaddrinfo", gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  boom), \
+                mock.patch.object(scan, "_PinnedHTTPS", boom):
+            r = scan._fetch(url)
+        self.assertFalse(r["ok"], url)
+        self.assertIn("non-public", r["error"], url)
+
+    def test_cgnat_deep_address_refused(self):
+        self._refused("http://100.100.100.200/")
+
+    def test_6to4_relay_anycast_refused(self):
+        self._refused("http://192.88.99.1/")
+
+
+class _FakeSock:
+    """Stands in for a connected socket: the watchdog's shutdown
+    releases whatever is blocked reading from it."""
+
+    def __init__(self):
+        self.killed = threading.Event()
+        self.timeouts = []
+
+    def settimeout(self, t):
+        self.timeouts.append(t)
+
+    def shutdown(self, how):
+        self.killed.set()
+
+    def close(self):
+        self.killed.set()
+
+
+class DripTests(unittest.TestCase):
+    """Slow-drip regression tests (round-4 review, H4): a server
+    that trickles bytes must not hold the scanner past the total
+    deadline — not in the headers, not in the body, and not by
+    multiplying the budget across the homepage plus probes. The
+    deadline is scaled down to 1s so the tests stay fast."""
+
+    def setUp(self):
+        FakeConn.instances = []
+
+    def test_header_drip_aborts_at_deadline(self):
+        class DripConn(FakeConn):
+            def __init__(self, host, port, timeout=None, **kw):
+                super().__init__(host, port, timeout=timeout)
+                self.sock = _FakeSock()
+
+            def getresponse(self):
+                # One header byte at a time, far slower than any
+                # single-read timeout: only the watchdog killing
+                # the socket can end this wait.
+                if not self.sock.killed.wait(30):
+                    raise AssertionError("watchdog never fired")
+                raise OSError("socket shut down by watchdog")
+
+        with mock.patch.object(scan, "_TOTAL_DEADLINE", 1.0), \
+                mock.patch.object(scan.socket, "getaddrinfo",
+                                  gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  DripConn):
+            t0 = time.monotonic()
+            r = scan._fetch("http://example.com/")
+            elapsed = time.monotonic() - t0
+        self.assertFalse(r["ok"])
+        self.assertIn("deadline", r["error"])
+        self.assertLess(elapsed, 5)
+
+    def test_body_drip_aborts_near_deadline(self):
+        class DripResp(FakeResp):
+            def read(self, n=-1):
+                time.sleep(0.3)
+                return b"x"
+
+        FakeConn.responder = staticmethod(lambda c: DripResp(200))
+        with mock.patch.object(scan, "_TOTAL_DEADLINE", 1.0), \
+                mock.patch.object(scan.socket, "getaddrinfo",
+                                  gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  FakeConn):
+            t0 = time.monotonic()
+            r = scan._fetch("http://example.com/")
+            elapsed = time.monotonic() - t0
+        self.assertTrue(r["ok"])
+        self.assertLess(elapsed, 3)
+
+    def test_deadline_is_per_scan_not_per_fetch(self):
+        # The homepage answers instantly; every probe drips its
+        # headers. If each fetch got its own budget, the four
+        # probes alone would take ~4s at the scaled deadline —
+        # one shared scan budget keeps the whole scan near 1s.
+        class MixedConn(FakeConn):
+            count = 0
+
+            def __init__(self, host, port, timeout=None, **kw):
+                super().__init__(host, port, timeout=timeout)
+                MixedConn.count += 1
+                self.n = MixedConn.count
+                self.sock = _FakeSock()
+
+            def getresponse(self):
+                if self.n == 1:
+                    return FakeResp(200, [], [b"<html></html>"])
+                if not self.sock.killed.wait(30):
+                    raise AssertionError("watchdog never fired")
+                raise OSError("socket shut down by watchdog")
+
+        MixedConn.count = 0
+        with mock.patch.object(scan, "_TOTAL_DEADLINE", 1.0), \
+                mock.patch.object(scan.socket, "getaddrinfo",
+                                  gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  MixedConn):
+            t0 = time.monotonic()
+            scan.scan("http://example.com/")
+            elapsed = time.monotonic() - t0
+        self.assertGreater(MixedConn.count, 1)  # probes did run
+        self.assertLess(elapsed, 3)
+
+
+class CliExitCodes(unittest.TestCase):
+    """Exit-code contract (see phpatchscan/__main__.py and the
+    README): 0 clean, 1 actionable, 2 usage error or a target
+    the scanner could not judge at all — unreachable, or
+    not_assessed (branch newer than the advisory database)."""
+
+    def _run(self, statuses):
+        results = iter({"verdict": {"status": s}} for s in statuses)
+        with mock.patch.object(cli, "scan",
+                               lambda url: next(results)), \
+                redirect_stdout(io.StringIO()):
+            return cli.main(["http://x"] * len(statuses))
+
+    def test_clean_statuses_exit_0(self):
+        for s in ("patched", "indeterminate", "no_php_detected"):
+            self.assertEqual(self._run([s]), 0, s)
+
+    def test_actionable_statuses_exit_1(self):
+        for s in ("vulnerable", "possibly_vulnerable", "eol"):
+            self.assertEqual(self._run([s]), 1, s)
+
+    def test_not_assessed_exit_2(self):
+        self.assertEqual(self._run(["not_assessed"]), 2)
+
+    def test_unreachable_exit_2(self):
+        self.assertEqual(self._run(["unreachable"]), 2)
+
+    def test_worst_code_wins(self):
+        self.assertEqual(self._run(["vulnerable", "not_assessed"]), 2)
+        self.assertEqual(self._run(["patched", "vulnerable"]), 1)
+
+    def test_no_args_is_usage_error(self):
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main([]), 2)
 
 
 if __name__ == "__main__":
