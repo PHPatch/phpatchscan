@@ -37,7 +37,19 @@ def branch_of(version):
     return f"{version[0]}.{version[1]}"
 
 
-def verdict_for(version):
+_DISTRO_RE = re.compile(r"(ubuntu|~deb\d|\+deb\d|-deb\d|\.deb\d|debian)",
+                        re.I)
+
+
+def distro_build(text):
+    """True when a raw version string looks like a distribution
+    package build (Ubuntu/Debian-style suffix). Distros backport
+    security fixes without moving the upstream version, so a
+    below-floor distro build is a 'check' signal, not proof."""
+    return bool(text and _DISTRO_RE.search(str(text)))
+
+
+def verdict_for(version, distro=False):
     """Return a verdict dict for one PHP version tuple.
 
     status: 'patched' | 'vulnerable' | 'eol' | 'unknown'
@@ -74,16 +86,25 @@ def verdict_for(version):
                              "floor": floor_txt})
     if problems:
         p = problems[0]
+        detail = (f"PHP {fmt(version)} is below the patched "
+                  f"release {p['floor']} for branch {branch} "
+                  f"({', '.join(p['cves'])}).")
+        if distro:
+            detail += (" This build looks like a distribution "
+                       "package: distros backport security fixes "
+                       "without changing the upstream version, so "
+                       "treat this as a check signal, not proof — "
+                       "confirm via the distro security tracker or "
+                       "the on-server deep check.")
         return {"status": "vulnerable", "version": fmt(version),
                 "branch": branch, "advisory": p["advisory"],
                 "cves": p["cves"], "cvss_v4": p.get("cvss_v4"),
-                "floor": p["floor"],
-                "detail": (f"PHP {fmt(version)} is below the patched "
-                           f"release {p['floor']} for branch {branch} "
-                           f"({', '.join(p['cves'])}).")}
+                "floor": p["floor"], "detail": detail}
     return {"status": "patched", "version": fmt(version), "branch": branch,
             "detail": f"PHP {fmt(version)} is at or above every patched "
-                      "release floor for its branch."}
+                      "release floor for its branch. 'Patched' covers "
+                      "only the advisories in this database — it is "
+                      "not a general security guarantee."}
 
 
 def fixed_tag_for(version, variant):

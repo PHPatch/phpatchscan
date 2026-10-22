@@ -1,0 +1,4 @@
+# Every change requires review by the maintainer; the advisory
+# database additionally gates what verdicts the scanner can give.
+* @PHPatch
+/phpatchscan/data/cves.json @PHPatch

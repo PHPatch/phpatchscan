@@ -15,6 +15,7 @@ import ipaddress
 import re
 import socket
 import ssl
+import time
 import urllib.parse
 
 from . import versioning
@@ -124,6 +125,35 @@ def _preflight(url):
     return None, parts, port
 
 
+_DEADLINE = 25  # total seconds allowed for one response body
+
+
+def _read_capped(resp):
+    """Read a response body up to _MAX_BODY bytes under a TOTAL
+    deadline, so a slow-drip server cannot hold the scanner open
+    one byte at a time under the per-read socket timeout. The cap
+    applies to the raw bytes as received; the scanner never
+    decompresses, so a compressed bomb never expands."""
+    chunks, got = [], 0
+    end = time.monotonic() + _DEADLINE
+    while got <= _MAX_BODY:
+        if time.monotonic() > end:
+            break
+        try:
+            chunk = resp.read(min(65536, _MAX_BODY + 1 - got))
+        except http.client.IncompleteRead as e:
+            # Server/proxy closed mid-body (common behind CDNs);
+            # the partial body is still a successful fetch.
+            if e.partial:
+                chunks.append(e.partial)
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)[:_MAX_BODY]
+
+
 def _fetch(url, ctx=None):
     """Guarded fetch: http/https only, ports 80/443 only, no URL
     credentials, every redirect hop re-validated and IP-pinned,
@@ -167,12 +197,7 @@ def _fetch(url, ctx=None):
                 conn.close()
                 current = urllib.parse.urljoin(current, location)
                 continue
-            try:
-                raw = resp.read(_MAX_BODY + 1)[:_MAX_BODY]
-            except http.client.IncompleteRead as e:
-                # Server/proxy closed mid-body (common behind CDNs);
-                # the partial body is still a successful fetch.
-                raw = (e.partial or b"")[:_MAX_BODY]
+            raw = _read_capped(resp)
             body = raw.decode("utf-8", "replace")
             return {"ok": status < 400, "status": status,
                     "final_url": current, "headers": headers,
@@ -246,12 +271,14 @@ def scan(url):
         result["signals"]["meta_generator"] = meta_gen
 
     # Exact version disclosure: headers first
+    raw_version_text = ""
     for src, text in (("X-Powered-By", xpb), ("Server", server)):
         v = versioning.parse_version(re.search(r"PHP/(\S+)", text).group(1)) \
             if re.search(r"PHP/(\S+)", text) else None
         if v:
             result["php_version"] = versioning.fmt(v)
             result["version_source"] = src
+            raw_version_text = re.search(r"PHP/(\S+)", text).group(1)
             break
 
     # phpinfo probes — an exposed phpinfo both leaks the exact version
@@ -269,11 +296,14 @@ def scan(url):
                 if vm and result["php_version"] is None:
                     result["php_version"] = vm.group(1)
                     result["version_source"] = f"phpinfo ({path})"
+                    raw_version_text = vm.group(0)
                 break
 
     vtuple = versioning.parse_version(result["php_version"])
     if vtuple:
-        result["verdict"] = versioning.verdict_for(vtuple)
+        result["verdict"] = versioning.verdict_for(
+            vtuple,
+            distro=versioning.distro_build(raw_version_text))
     elif result["signals"] or result["cms"]:
         result["verdict"] = {
             "status": "indeterminate",

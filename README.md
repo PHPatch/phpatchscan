@@ -18,8 +18,9 @@ runtime below the fixed release for a known critical advisory**
 - **Public targets only.** The fetcher refuses loopback, private
   and link-local addresses (including cloud metadata endpoints),
   non-HTTP(S) schemes and ports other than 80/443, pins the
-  validated IP, and re-validates every redirect — it cannot be
-  pointed at internal services.
+  validated IP, and re-validates every redirect — it is designed
+  so it cannot be pointed at internal services. The refusals are
+  exercised by the test suite in `tests/` on every push.
 - **Zero dependencies.** Python 3.11+ standard library only.
 
 ## Run it
@@ -42,11 +43,29 @@ one-click snapshot-first patching with a restore-tested safety net,
 automatic revert on failure, verified rollback, and a work report with a SHA-256
 integrity hash: [phpatch.com](https://phpatch.com).
 
+## Authorized use
+
+Only scan sites you own or have permission to scan. The hosted
+scanner at phpatch.com additionally enforces rate limits and an
+opt-out blocklist for site operators (see the Terms, section 8).
+
 ## Advisory data
 
 `phpatchscan/data/cves.json` is the advisory database the scanner
 judges against — branch floors, fixed releases, references and the
-leak/exploitation timeline. Corrections welcome.
+leak/exploitation timeline. Last updated 2026-10-22. Update
+process: floors are reviewed against the php.net release
+announcements on every PHP security release and at least monthly.
+Corrections are welcome as pull requests; every change to this
+file requires maintainer review (see CODEOWNERS), because it
+changes the verdicts the scanner gives.
+
+A verdict of `patched` means only that the disclosed version is
+not below the fixed releases in this database — it is not a
+general security guarantee. A version below a floor on a
+distribution build (Ubuntu/Debian packages) is a "check" signal,
+not proof: distros backport fixes without changing the upstream
+version, and the scanner says so when it detects a distro build.
 
 ## License
 
