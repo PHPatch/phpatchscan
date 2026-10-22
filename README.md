@@ -26,17 +26,31 @@ runtime below the fixed release for a known critical advisory**
   exercised by the test suite in `tests/` on every push.
 - **Zero dependencies.** Python 3.11+ standard library only.
 
+## Install
+
+```bash
+git clone https://github.com/PHPatch/phpatchscan.git
+cd phpatchscan
+# Python 3.11+ standard library only — no pip install, no dependencies.
+```
+
 ## Run it
 
-Install from the zip (or from a clone of this repo), then run it
-from anywhere:
+From the clone, run it right there — no install step:
+
+```bash
+python3 -m phpatchscan https://your-site.com
+```
+
+Prefer a zip? Download `phpatchscan.zip` from phpatch.com, then
+either install it and run from anywhere:
 
 ```bash
 python3 -m pip install phpatchscan.zip
 python3 -m phpatchscan https://your-site.com
 ```
 
-Or skip installing: unzip, step into the folder, and run it there:
+or unzip and run in place:
 
 ```bash
 unzip phpatchscan.zip
