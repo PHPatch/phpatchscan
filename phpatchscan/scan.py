@@ -46,6 +46,15 @@ def _public_ips(host):
     ips = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
+        # Unwrap transition forms: the real TCP destination of an
+        # IPv4-mapped (::ffff:a.b.c.d) or 6to4 (2002:xxxx::) address
+        # is the embedded IPv4, so THAT is what must be checked —
+        # the IPv6 spelling alone does not trip the IPv4 ranges.
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            elif ip.sixtofour is not None:
+                ip = ip.sixtofour
         if ip.is_loopback or ip.is_private or ip.is_link_local or \
                 ip.is_reserved or ip.is_multicast or ip.is_unspecified:
             raise BlockedTarget(
@@ -74,35 +83,58 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
             self.sock, server_hostname=self._sni_host)
 
 
+def _literal_refusal(host):
+    """Refuse non-standard IP encodings: decimal (2130706433), hex
+    (0x7f000001), octal parts (0177.0.0.1), short forms (127.1).
+    Resolver libraries disagree on these spellings, so they never
+    reach a resolver at all."""
+    if "0x" in host.lower():
+        return "hex-encoded IP addresses are refused"
+    if re.fullmatch(r"[0-9.]+", host):
+        parts = host.split(".")
+        if len(parts) != 4 or any(
+                not p.isdigit() or int(p) > 255 or
+                (len(p) > 1 and p.startswith("0")) for p in parts):
+            return "non-standard IP address forms are refused"
+    return None
+
+
+def _preflight(url):
+    """Validate one fetch target. Called for the initial URL and
+    for EVERY redirect hop, so a redirect cannot smuggle in a
+    blocked scheme, port, credential or encoded address.
+    Returns (error, parts, port); error is None when clean."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return "only http/https URLs are scanned", None, None
+    if parts.username or parts.password:
+        return "URLs with credentials are refused", None, None
+    host = parts.hostname
+    if not host:
+        return "URL has no host", None, None
+    refusal = _literal_refusal(host)
+    if refusal:
+        return refusal, None, None
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        port = -1
+    if port not in (80, 443):
+        return "only ports 80 and 443 are scanned", None, None
+    return None, parts, port
+
+
 def _fetch(url, ctx=None):
     """Guarded fetch: http/https only, ports 80/443 only, no URL
     credentials, every redirect hop re-validated and IP-pinned,
     body capped. Returns the same dict shape as before."""
     current = url
     for _hop in range(_MAX_REDIRECTS + 1):
-        parts = urllib.parse.urlsplit(current)
-        if parts.scheme not in ("http", "https"):
+        err, parts, port = _preflight(current)
+        if err:
             return {"ok": False, "status": None, "final_url": current,
-                    "headers": {}, "body": "",
-                    "error": "only http/https URLs are scanned"}
-        if parts.username or parts.password:
-            return {"ok": False, "status": None, "final_url": current,
-                    "headers": {}, "body": "",
-                    "error": "URLs with credentials are refused"}
+                    "headers": {}, "body": "", "error": err}
         host = parts.hostname
-        if not host:
-            return {"ok": False, "status": None, "final_url": current,
-                    "headers": {}, "body": "",
-                    "error": "URL has no host"}
-        try:
-            port = parts.port or (443 if parts.scheme == "https"
-                                  else 80)
-        except ValueError:
-            port = -1
-        if port not in (80, 443):
-            return {"ok": False, "status": None, "final_url": current,
-                    "headers": {}, "body": "",
-                    "error": "only ports 80 and 443 are scanned"}
         try:
             ips = _public_ips(host)
         except BlockedTarget as e:
@@ -277,9 +309,8 @@ def render_text(r):
                      "For a certain answer, run the read-only deep "
                      "check on the server (it only reads versions and "
                      "changes nothing):")
-        lines.append("               https://phpatch.com — the full "
-                     "service runs the deep check for you.")
+        lines.append("               phppatch deepcheck --host "
+                     "root@your-server")
         lines.append("             Site ownership is verified before "
-                     "any deeper check. This scan used passive "
-                     "fingerprinting only — no exploit probes.")
+                     "any deeper check. This scan used passive fingerprinting and limited, read-only path checks only — no exploit probes.")
     return "\n".join(lines)

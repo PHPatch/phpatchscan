@@ -7,7 +7,7 @@ runtime below the fixed release for a known critical advisory**
 
 ## What it does
 
-- **Passive fingerprinting only.** It reads response headers,
+- **Passive fingerprinting plus limited path checks.** It reads response headers,
   generator tags and other signals a site already discloses
   publicly, and checks for a publicly exposed phpinfo page.
 - **Honest verdicts.** `vulnerable`, `patched`, `eol` (branch with
