@@ -1,9 +1,14 @@
-# phpatchscan — free external PHP vulnerability scanner
+# phpatchscan — free open-source PHP vulnerability scanner
 
-The open-source scanner behind [phpatch.com](https://phpatch.com).
-It answers one question about any public website: **is its PHP
-runtime below the fixed release for a known critical advisory**
-(starting with php2shell, CVE-2026-109618 / CVE-2026-109619)?
+**Is your PHP version vulnerable to php2shell?** phpatchscan is a
+free, disclosure-only scanner that answers that question for any
+public website. It checks the PHP version a site discloses against
+the fixed releases for **php2shell — CVE-2026-109618 /
+CVE-2026-109619** (CVSS v4 9.2, unauthenticated remote code
+execution in PHP core) — and, more generally, against the branch
+floors in its advisory database.
+
+It is the open-source scanner behind [phpatch.com](https://phpatch.com).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
@@ -12,17 +17,16 @@ runtime below the fixed release for a known critical advisory**
 
 ## What it does
 
-- **Passive fingerprinting plus limited path checks.** It reads response headers,
-  generator tags and other signals a site already discloses
-  publicly, and checks for a publicly exposed phpinfo page.
-- **Honest verdicts.** `vulnerable`, `patched`, `eol` (branch with
-  no fix), `possibly_vulnerable` (a distribution build below a
-  floor — a check signal, since distros backport fixes),
-  `not_assessed` (branch newer than the advisory database) — or
-  `indeterminate` when the site hides its version.
-  Most well-run sites hide it; we say so instead of guessing.
-- **No exploit probes, ever.** Nothing in this tool attempts to
-  trigger a vulnerability.
+- **Disclosure-only.** It reads what a site already discloses
+  publicly — `X-Powered-By` / `Server` headers, `PHPSESSID` cookies,
+  generator tags — plus a limited check for a publicly exposed
+  phpinfo page at a few well-known paths. It never sends an exploit
+  probe, a crafted payload, or anything designed to trigger the bug.
+- **Honest verdicts.** If a site hides its version, the scanner
+  says so (VERSION HIDDEN) instead of guessing. If a build looks
+  like a distribution package, a below-floor version is reported
+  as a check signal (POSSIBLY VULNERABLE), because distros backport
+  fixes without changing the version string.
 - **Public targets only.** The fetcher refuses loopback, private
   and link-local addresses (including cloud metadata endpoints),
   non-HTTP(S) schemes and ports other than 80/443, pins the
@@ -31,25 +35,92 @@ runtime below the fixed release for a known critical advisory**
   exercised by the test suite in `tests/` on every push.
 - **Zero dependencies.** Python 3.11+ standard library only.
 
-## How it compares
+## Verdicts
 
-The php2shell scanners that appeared in October 2026 differ
-mostly in **how they decide you are vulnerable** — and in whether
-they try to trigger the bug to find out:
+Every scan returns one JSON object per URL. The `verdict.status`
+field uses the vocabulary below (shown here in its display form):
 
-| Tool | Detection | Sends exploit triggers? | Remediation | License |
-|---|---|---|---|---|
-| **phpatchscan** (this repo) | Version fingerprint from what the site discloses; says "version hidden" instead of guessing | **No — never** | Via [PHP Patch Assurance](https://phpatch.com): snapshot-first patch, verify, rollback, evidence report | MIT |
-| OpenAI php2shell-checker | Version fingerprint from `X-Powered-By` / `Server` headers only | No | None | Apache-2.0 |
-| Searchlight Cyber php2shell-scanner | Behavioral — crafted multipart probes force PHP out of memory and watch for the crash | **Yes, deliberately** | None | No LICENSE file |
-| SamJUK php2shell-check | Behavioral, local — observes how the installed PHP binary terminates at its memory limit | Only against a throwaway local CLI process | None | MIT |
-| squiblyza php_vuln_scan | Version fingerprint from headers/markup, plus version-disclosure hunting | No | None | MIT |
-| JoasASantos php2shell-scanner | Version fingerprint + subdomain recon + origin scan | Optional opt-in probe (README warns of DoS risk) | None | README states MIT; no LICENSE file |
+| Verdict | JSON `status` | Meaning |
+|---|---|---|
+| **VULNERABLE** | `vulnerable` | The disclosed version is below the fixed release for its branch, and a patched release exists. |
+| **POSSIBLY VULNERABLE** | `possibly_vulnerable` | Below the floor, but the build looks like a distribution package — distros backport fixes, so this is a check signal, not proof. |
+| **PATCHED** | `patched` | The disclosed version is at or above every advisory floor for its branch. (Not a general security guarantee — only "not below the fixed releases in the database.") |
+| **END OF LIFE** | `eol` | The branch is below the advisory's EOL line (< 8.2 for php2shell): no patched release exists. The only complete remedies are a branch upgrade or taking the site offline. |
+| **VERSION HIDDEN** | `indeterminate` | PHP is present but the version is not disclosed, so patch status cannot be confirmed from outside. Most well-run sites land here. |
+| **NOT ASSESSED** | `not_assessed` | The branch is newer than the advisory database, so the scanner cannot judge it. |
 
-Full criteria, the fairness notes (behavioral checks catch
-backports; crash signals also misfire on some patched builds),
-SSRF-safety comparison and an FAQ:
-**[PHP vulnerability scanners compared](https://phpatch.com/compare)**.
+Two more statuses cover the scan itself: `no_php_detected` (no PHP
+signals found) and `unreachable` (the site did not answer, or the
+target was refused by the safety policy).
+
+## Sample session
+
+Recorded against a local test fixture that discloses
+`X-Powered-By: PHP/8.3.20` — the output format is exactly what the
+tool prints:
+
+```console
+$ python3 -m phpatchscan http://fixture.example
+{
+ "target": "http://fixture.example",
+ "reachable": true,
+ "http_status": 200,
+ "final_url": "http://fixture.example",
+ "error": null,
+ "signals": {
+  "x_powered_by": "PHP/8.3.20",
+  "server": "Apache/2.4.62"
+ },
+ "php_version": "8.3.20",
+ "version_source": "X-Powered-By",
+ "cms": [],
+ "phpinfo_exposed": false,
+ "verdict": {
+  "status": "vulnerable",
+  "version": "8.3.20",
+  "branch": "8.3",
+  "advisory": "php2shell-2026-10",
+  "cves": [
+   "CVE-2026-109618",
+   "CVE-2026-109619"
+  ],
+  "cvss_v4": 9.2,
+  "floor": "8.3.36",
+  "detail": "PHP 8.3.20 is below the patched release 8.3.36 for branch 8.3 (CVE-2026-109618, CVE-2026-109619)."
+ }
+}
+$ echo $?
+1
+```
+
+Exit code 1 = an actionable finding. A site that runs PHP but
+hides its version returns the VERSION HIDDEN verdict instead
+(verdict block shown; the rest of the object lists the signals it
+did see):
+
+```json
+"verdict": {
+ "status": "indeterminate",
+ "detail": "PHP is present (fingerprinted) but the version is not disclosed, so the patch status cannot be confirmed from outside. Run the deep check (SSH, read-only) for a definitive verdict."
+}
+```
+
+## Branch floors (php2shell)
+
+A branch is PATCHED at or above its fixed release; anything below
+it is VULNERABLE (or POSSIBLY VULNERABLE for distro builds):
+
+| PHP branch | Fixed in |
+|---|---|
+| 8.2 | **8.2.35** |
+| 8.3 | **8.3.36** |
+| 8.4 | **8.4.27** |
+| 8.5 | **8.5.12** |
+| < 8.2 | No fix — **END OF LIFE** (branch upgrade or offline) |
+
+The floors live in `phpatchscan/data/cves.json`, reviewed against
+the php.net release announcements on every PHP security release
+(see [Advisory data](#advisory-data)).
 
 ## Install
 
@@ -97,13 +168,41 @@ the worst code wins.
 Prefer a browser? The same scan runs free at
 [phpatch.com](https://phpatch.com) and includes a PDF report.
 
-## What it is not
+## How it compares
 
-The external scan cannot see servers that hide their version. The
-full PHP Patch Assurance adds a read-only on-server deep check,
-one-click snapshot-first patching with a restore-tested safety net,
-automatic revert on failure, verified rollback, and a work report with a SHA-256
-integrity hash: [phpatch.com](https://phpatch.com).
+The php2shell scanners that appeared in October 2026 differ
+mostly in **how they decide you are vulnerable** — and in whether
+they try to trigger the bug to find out:
+
+| Tool | Detection | Sends exploit triggers? | Remediation | License |
+|---|---|---|---|---|
+| **phpatchscan** (this repo) | Version fingerprint from what the site discloses; says "version hidden" instead of guessing | **No — never** | Via [PHP Patch Assurance](https://phpatch.com): snapshot-first patch, verify, rollback, evidence report | MIT |
+| OpenAI php2shell-checker | Version fingerprint from `X-Powered-By` / `Server` headers only | No | None | Apache-2.0 |
+| Searchlight Cyber php2shell-scanner | Behavioral — crafted multipart probes force PHP out of memory and watch for the crash | **Yes, deliberately** | None | No LICENSE file |
+| SamJUK php2shell-check | Behavioral, local — observes how the installed PHP binary terminates at its memory limit | Only against a throwaway local CLI process | None | MIT |
+| squiblyza php_vuln_scan | Version fingerprint from headers/markup, plus version-disclosure hunting | No | None | MIT |
+| JoasASantos php2shell-scanner | Version fingerprint + subdomain recon + origin scan | Optional opt-in probe (README warns of DoS risk) | None | README states MIT; no LICENSE file |
+
+Full criteria, the fairness notes (behavioral checks catch
+backports; crash signals also misfire on some patched builds),
+SSRF-safety comparison and an FAQ:
+**[PHP vulnerability scanners compared](https://phpatch.com/compare)**.
+
+## What it doesn't do
+
+- **It doesn't patch anything.** The scanner is read-only and
+  external; it cannot change your server.
+- **It can't see a hidden version.** From outside, VERSION HIDDEN
+  is the honest end of the road — a definitive verdict for those
+  sites needs a read-only look on the server itself.
+- **It doesn't monitor or alert.** It's a point-in-time check you
+  run; it won't notice next month's advisory for you.
+- **It isn't a general security audit.** It judges the disclosed
+  PHP version against its advisory database — nothing more.
+
+Patching, on-server verification, rollback, an evidence work
+report, and monitoring are what the hosted service adds:
+**[PHP Patch Assurance — phpatch.com](https://phpatch.com)**.
 
 ## Authorized use
 
