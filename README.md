@@ -11,7 +11,10 @@ runtime below the fixed release for a known critical advisory**
   generator tags and other signals a site already discloses
   publicly, and checks for a publicly exposed phpinfo page.
 - **Honest verdicts.** `vulnerable`, `patched`, `eol` (branch with
-  no fix) — or `indeterminate` when the site hides its version.
+  no fix), `possibly_vulnerable` (a distribution build below a
+  floor — a check signal, since distros backport fixes),
+  `not_assessed` (branch newer than the advisory database) — or
+  `indeterminate` when the site hides its version.
   Most well-run sites hide it; we say so instead of guessing.
 - **No exploit probes, ever.** Nothing in this tool attempts to
   trigger a vulnerability.

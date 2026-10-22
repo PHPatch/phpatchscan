@@ -11,7 +11,7 @@ import socket
 import unittest
 from unittest import mock
 
-from phppatchscan import scan, versioning
+from phpatchscan import scan, versioning
 
 PUBLIC = "93.184.216.34"
 META = "169.254.169.254"
@@ -106,6 +106,27 @@ class LiteralRefusals(unittest.TestCase):
                 r = scan._fetch(url)
             self.assertFalse(r["ok"], url)
             self.assertTrue(r["error"], url)
+
+    def test_refusals_say_why(self):
+        # A refusal must assert its REASON (an earlier suite only
+        # asserted "not ok + some error", which let a 12-second
+        # timeout pass as a refusal). Resolved-address refusals say
+        # "non-public"; encoded-literal refusals say "refused".
+        for url in ("http://100.64.0.1/", "http://192.168.1.1/",
+                    "http://169.254.169.254/", "http://localtest.me/"):
+            with mock.patch.object(scan.socket, "getaddrinfo", gai_smart):
+                r = scan._fetch(url)
+            self.assertIn("non-public", r["error"], url)
+        # The resolved IP must not leak back into the message: for
+        # a name, the internal answer stays private.
+        with mock.patch.object(scan.socket, "getaddrinfo", gai_smart):
+            r = scan._fetch("http://localtest.me/")
+        self.assertNotIn("127.0.0.1", r["error"])
+        for url in ("http://127.1/", "http://2130706433/",
+                    "http://0x7f000001/"):
+            with mock.patch.object(scan.socket, "getaddrinfo", gai_smart):
+                r = scan._fetch(url)
+            self.assertIn("refused", r["error"], url)
 
 
 class ParserTricks(unittest.TestCase):
@@ -236,13 +257,188 @@ class DistroWording(unittest.TestCase):
 
     def test_distro_verdict_is_check_not_proof(self):
         v = versioning.verdict_for((8, 3, 6), distro=True)
-        self.assertEqual(v["status"], "vulnerable")
+        self.assertEqual(v["status"], "possibly_vulnerable")
         self.assertIn("check signal, not proof", v["detail"])
 
     def test_patched_is_not_a_general_guarantee(self):
         v = versioning.verdict_for((8, 3, 36))
         self.assertEqual(v["status"], "patched")
         self.assertIn("not a general security guarantee", v["detail"])
+
+
+class BlockedRanges(unittest.TestCase):
+    """Ranges the old is_private-based check missed (found by the
+    2026-10-22 review): CGNAT / shared address space (incl. cloud
+    metadata endpoints living there), benchmarking space, the
+    deprecated 6to4 relay anycast, and the NAT64 / Teredo
+    transition prefixes. Each must be refused by ADDRESS POLICY —
+    with the reason in the message — and no connection may be
+    attempted at all."""
+    URLS = ["http://100.64.0.1/", "http://100.100.100.200/",
+            "http://198.18.0.5/", "http://192.88.99.1/",
+            "http://[64:ff9b::c000:201]/", "http://[2001::1]/"]
+
+    def test_blocked_with_reason_and_no_connect(self):
+        for url in self.URLS:
+            boom = mock.Mock(
+                side_effect=AssertionError("connect attempted"))
+            with mock.patch.object(scan.socket, "getaddrinfo",
+                                   gai_smart), \
+                    mock.patch.object(scan.http.client,
+                                      "HTTPConnection", boom), \
+                    mock.patch.object(scan, "_PinnedHTTPS", boom):
+                r = scan._fetch(url)
+            self.assertFalse(r["ok"], url)
+            self.assertIn("non-public", r["error"], url)
+
+
+class VersionBoundaries(unittest.TestCase):
+    def test_floor_boundaries(self):
+        cases = [((8, 2, 34), "vulnerable"), ((8, 2, 35), "patched"),
+                 ((8, 3, 35), "vulnerable"), ((8, 3, 36), "patched"),
+                 ((8, 5, 11), "vulnerable"), ((8, 5, 12), "patched")]
+        for version, want in cases:
+            self.assertEqual(
+                versioning.verdict_for(version)["status"], want,
+                version)
+
+    def test_eol_branch_wording(self):
+        v = versioning.verdict_for((8, 1, 34))
+        self.assertEqual(v["status"], "eol")
+        self.assertIn("partially", v["detail"])
+        self.assertIn("offline", v["detail"])
+
+    def test_eol_distro_caveat(self):
+        v = versioning.verdict_for((8, 1, 2), distro=True)
+        self.assertEqual(v["status"], "eol")
+        self.assertIn("distribution", v["detail"])
+
+    def test_unknown_newer_branch_not_assessed(self):
+        v = versioning.verdict_for((8, 9, 1))
+        self.assertEqual(v["status"], "not_assessed")
+
+
+class ScanFixtures(unittest.TestCase):
+    """Fixture-driven scan() runs: _fetch is stubbed, so scan()'s
+    own logic (verdict wiring, probe construction) is exercised
+    without any network."""
+
+    def _home(self, **kw):
+        d = {"ok": True, "status": 200,
+             "final_url": "https://example.com/",
+             "headers": {}, "body": "<html></html>", "error": None}
+        d.update(kw)
+        return d
+
+    def test_header_version_verdict(self):
+        calls = []
+
+        def fake_fetch(url, ctx=None):
+            calls.append(url)
+            if len(calls) == 1:
+                return self._home(
+                    headers={"X-Powered-By": "PHP/8.3.35"})
+            return self._home(status=404, ok=False,
+                              error="HTTP 404")
+
+        with mock.patch.object(scan, "_fetch", fake_fetch):
+            r = scan.scan("https://example.com/")
+        self.assertEqual(r["php_version"], "8.3.35")
+        self.assertEqual(r["verdict"]["status"], "vulnerable")
+
+    def test_probes_built_from_origin_not_final_path(self):
+        calls = []
+
+        def fake_fetch(url, ctx=None):
+            calls.append(url)
+            if len(calls) == 1:
+                return self._home(
+                    final_url="https://example.com/en/index.php?x=1")
+            return self._home(status=404, ok=False,
+                              error="HTTP 404")
+
+        with mock.patch.object(scan, "_fetch", fake_fetch):
+            scan.scan("https://example.com/en/index.php?x=1")
+        probes = calls[1:]
+        self.assertTrue(probes)
+        for p in probes:
+            self.assertTrue(p.startswith("https://example.com/"), p)
+            self.assertNotIn("index.php", p)
+
+    def test_phpinfo_fixture_marks_exposed(self):
+        body = ("<html><title>phpinfo()</title>"
+                "PHP Version 8.3.35</html>")
+
+        def fake_fetch(url, ctx=None):
+            if "phpinfo.php" in url:
+                return self._home(body=body)
+            return self._home()
+
+        with mock.patch.object(scan, "_fetch", fake_fetch):
+            r = scan.scan("https://example.com/")
+        self.assertTrue(r["phpinfo_exposed"])
+        self.assertEqual(r["php_version"], "8.3.35")
+
+
+class FetchBehavior(unittest.TestCase):
+    def setUp(self):
+        FakeConn.instances = []
+
+    def test_duplicate_set_cookie_headers_all_kept(self):
+        FakeConn.responder = staticmethod(lambda c: FakeResp(200, [
+            ("Set-Cookie", "PHPSESSID=abc; path=/"),
+            ("Set-Cookie", "other=1; path=/")], [b"ok"]))
+        with mock.patch.object(scan.socket, "getaddrinfo",
+                               gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  FakeConn):
+            r = scan._fetch("http://example.com/")
+        sc = scan._h(r["headers"], "Set-Cookie")
+        self.assertIn("PHPSESSID", sc)
+        self.assertIn("other=1", sc)
+
+    def test_second_ip_tried_when_first_refuses(self):
+        def gai2(host, port, *a, **k):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                     ("93.184.216.34", 0)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                     ("93.184.216.35", 0))]
+
+        class Flaky(FakeConn):
+            def request(self, method, path, headers=None):
+                if self.host == "93.184.216.34":
+                    raise OSError("connection refused")
+                super().request(method, path, headers)
+
+        FakeConn.responder = staticmethod(lambda c: FakeResp(200))
+        with mock.patch.object(scan.socket, "getaddrinfo", gai2), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  Flaky):
+            r = scan._fetch("http://example.com/")
+        self.assertTrue(r["ok"])
+        self.assertEqual([c.host for c in FakeConn.instances],
+                         ["93.184.216.34", "93.184.216.35"])
+
+    def test_total_deadline_bounds_connect_timeout(self):
+        seen = {}
+
+        class Slow(FakeConn):
+            def __init__(self, host, port, timeout=None, **kw):
+                super().__init__(host, port, timeout=timeout)
+                seen["timeout"] = timeout
+
+            def getresponse(self):
+                raise socket.timeout("timed out")
+
+        with mock.patch.object(scan, "_TOTAL_DEADLINE", 3), \
+                mock.patch.object(scan.socket, "getaddrinfo",
+                                  gai_smart), \
+                mock.patch.object(scan.http.client, "HTTPConnection",
+                                  Slow):
+            r = scan._fetch("http://example.com/")
+        self.assertFalse(r["ok"])
+        self.assertLessEqual(seen["timeout"], 3)
+        self.assertIn("timed out", r["error"])
 
 
 if __name__ == "__main__":

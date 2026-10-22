@@ -20,7 +20,7 @@ import urllib.parse
 
 from . import versioning
 
-_UA = ("phpatchscan/1.0 (+https://phpatch.com/security; "
+_UA = ("phpatchscan/1.4.4 (+https://phpatch.com/security; "
        "free vulnerability scan)")
 _TIMEOUT = 12
 _MAX_BODY = 512 * 1024
@@ -30,6 +30,30 @@ _PHPINFO_PATHS = ("/phpinfo.php", "/info.php", "/php-info.php", "/test.php")
 
 class BlockedTarget(Exception):
     """Target refused by the scanner's SSRF/abuse policy."""
+
+
+# Ranges that Python's is_global / is_private flags do not classify
+# consistently across versions, checked explicitly: carrier-grade
+# NAT (includes cloud metadata endpoints in that space), the IETF
+# special-purpose /24, benchmarking space, the deprecated 6to4
+# relay anycast, and the IPv6 transition prefixes whose embedded
+# IPv4 destination could be non-public (NAT64 well-known prefix,
+# Teredo).
+_EXTRA_BLOCKED = [ipaddress.ip_network(n) for n in (
+    "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15",
+    "192.88.99.0/24", "64:ff9b::/96", "2001::/32")]
+
+
+def _blocked(ip):
+    """True unless the address is globally routable public space.
+
+    Primary test is is_global (negated): it covers loopback,
+    RFC1918, link-local (incl. cloud metadata 169.254.169.254),
+    CGNAT, reserved and unspecified space across Python versions,
+    which the individual is_private-style flags do not.
+    """
+    return (not ip.is_global or ip.is_multicast
+            or any(ip in n for n in _EXTRA_BLOCKED))
 
 
 def _public_ips(host):
@@ -56,10 +80,9 @@ def _public_ips(host):
                 ip = ip.ipv4_mapped
             elif ip.sixtofour is not None:
                 ip = ip.sixtofour
-        if ip.is_loopback or ip.is_private or ip.is_link_local or \
-                ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        if _blocked(ip):
             raise BlockedTarget(
-                f"{host} resolves to a non-public address ({ip}); "
+                f"{host} resolves to a non-public address; "
                 "the scanner only fetches public websites")
         if str(ip) not in ips:
             ips.append(str(ip))
@@ -89,7 +112,7 @@ def _literal_refusal(host):
     (0x7f000001), octal parts (0177.0.0.1), short forms (127.1).
     Resolver libraries disagree on these spellings, so they never
     reach a resolver at all."""
-    if "0x" in host.lower():
+    if re.fullmatch(r"0[xX][0-9a-fA-F]+", host):
         return "hex-encoded IP addresses are refused"
     if re.fullmatch(r"[0-9.]+", host):
         parts = host.split(".")
@@ -126,16 +149,20 @@ def _preflight(url):
 
 
 _DEADLINE = 25  # total seconds allowed for one response body
+_TOTAL_DEADLINE = 40  # total seconds for one whole fetch, all hops
 
 
-def _read_capped(resp):
+def _read_capped(resp, budget=None):
     """Read a response body up to _MAX_BODY bytes under a TOTAL
     deadline, so a slow-drip server cannot hold the scanner open
     one byte at a time under the per-read socket timeout. The cap
     applies to the raw bytes as received; the scanner never
-    decompresses, so a compressed bomb never expands."""
+    decompresses, so a compressed bomb never expands. `budget`
+    (seconds remaining in the fetch's total deadline) can only
+    shorten the read, never extend it past _DEADLINE."""
     chunks, got = [], 0
-    end = time.monotonic() + _DEADLINE
+    secs = _DEADLINE if budget is None else min(_DEADLINE, budget)
+    end = time.monotonic() + secs
     while got <= _MAX_BODY:
         if time.monotonic() > end:
             break
@@ -154,11 +181,26 @@ def _read_capped(resp):
     return b"".join(chunks)[:_MAX_BODY]
 
 
+def _headers_dict(resp):
+    """Response headers as a dict, merging duplicates (notably
+    Set-Cookie) instead of letting dict() keep only the last one —
+    a PHPSESSID on an earlier Set-Cookie line must still be seen."""
+    out = {}
+    for k, v in resp.getheaders():
+        out[k] = f"{out[k]}, {v}" if k in out else v
+    return out
+
+
 def _fetch(url, ctx=None):
     """Guarded fetch: http/https only, ports 80/443 only, no URL
     credentials, every redirect hop re-validated and IP-pinned,
-    body capped. Returns the same dict shape as before."""
+    body capped, and a TOTAL deadline across connect + headers +
+    body + all hops, so a slow-drip server cannot hold a worker
+    open. When a host resolves to several public IPs, each is
+    tried in turn on connection-level failures. Returns the same
+    dict shape as before."""
     current = url
+    end = time.monotonic() + _TOTAL_DEADLINE
     for _hop in range(_MAX_REDIRECTS + 1):
         err, parts, port = _preflight(current)
         if err:
@@ -175,46 +217,62 @@ def _fetch(url, ctx=None):
             path += "?" + parts.query
         host_hdr = host if port in (80, 443) and \
             parts.port is None else f"{host}:{port}"
-        conn = None
-        try:
-            if parts.scheme == "https":
-                conn = _PinnedHTTPS(ips[0], port, host, _TIMEOUT)
-            else:
-                conn = http.client.HTTPConnection(ips[0], port,
-                                                  timeout=_TIMEOUT)
-            conn.request("GET", path,
-                         headers={"User-Agent": _UA, "Host": host_hdr,
-                                  "Accept": "*/*",
-                                  "Connection": "close"})
-            resp = conn.getresponse()
-            status = resp.status
-            headers = dict(resp.getheaders())
-            location = None
-            for k, v in headers.items():
-                if k.lower() == "location":
-                    location = v
-            if status in (301, 302, 303, 307, 308) and location:
-                conn.close()
-                current = urllib.parse.urljoin(current, location)
-                continue
-            raw = _read_capped(resp)
-            body = raw.decode("utf-8", "replace")
-            return {"ok": status < 400, "status": status,
-                    "final_url": current, "headers": headers,
-                    "body": body,
-                    "error": None if status < 400 else f"HTTP {status}"}
-        except Exception as e:  # DNS, TLS, timeout, refused
-            return {"ok": False, "status": None, "final_url": current,
-                    "headers": {}, "body": "", "error": str(e)}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+        last_err = None
+        redirected = False
+        for ip in ips:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return {"ok": False, "status": None,
+                        "final_url": current, "headers": {}, "body": "",
+                        "error": "scan timed out: total deadline "
+                                 f"({_TOTAL_DEADLINE}s) exceeded"}
+            timeout = max(1.0, min(_TIMEOUT, remaining))
+            conn = None
+            try:
+                if parts.scheme == "https":
+                    conn = _PinnedHTTPS(ip, port, host, timeout)
+                else:
+                    conn = http.client.HTTPConnection(ip, port,
+                                                      timeout=timeout)
+                conn.request("GET", path,
+                             headers={"User-Agent": _UA,
+                                      "Host": host_hdr,
+                                      "Accept": "*/*",
+                                      "Connection": "close"})
+                resp = conn.getresponse()
+                status = resp.status
+                headers = _headers_dict(resp)
+                location = None
+                for k, v in headers.items():
+                    if k.lower() == "location":
+                        location = v
+                if status in (301, 302, 303, 307, 308) and location:
+                    current = urllib.parse.urljoin(current, location)
+                    redirected = True
+                    break
+                raw = _read_capped(resp, end - time.monotonic())
+                body = raw.decode("utf-8", "replace")
+                return {"ok": status < 400, "status": status,
+                        "final_url": current, "headers": headers,
+                        "body": body,
+                        "error": None if status < 400
+                        else f"HTTP {status}"}
+            except Exception as e:  # DNS, TLS, timeout, refused
+                last_err = e
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        if redirected:
+            continue
+        return {"ok": False, "status": None, "final_url": current,
+                "headers": {}, "body": "", "error": str(last_err)}
     return {"ok": False, "status": None, "final_url": current,
             "headers": {}, "body": "",
             "error": f"too many redirects (>{_MAX_REDIRECTS})"}
+
 
 
 def _h(headers, name):
@@ -282,22 +340,26 @@ def scan(url):
             break
 
     # phpinfo probes — an exposed phpinfo both leaks the exact version
-    # and is itself a finding.
-    base = home["final_url"].rstrip("/")
-    if result["php_version"] is None or True:
-        for path in _PHPINFO_PATHS:
-            probe = _fetch(base + path)
-            b = probe["body"]
-            if probe["status"] == 200 and "phpinfo()" in b and \
-                    re.search(r"PHP Version\s*&?#?\w*\s*([0-9]+\.[0-9]+\.[0-9]+)", b):
-                vm = re.search(r"PHP Version[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)", b)
-                result["phpinfo_exposed"] = True
-                result["signals"]["phpinfo_path"] = path
-                if vm and result["php_version"] is None:
-                    result["php_version"] = vm.group(1)
-                    result["version_source"] = f"phpinfo ({path})"
-                    raw_version_text = vm.group(0)
-                break
+    # and is itself a finding, so the probes run on every scan (the
+    # footprint is the four well-known paths, nothing more). Probes
+    # are built from the final URL's ORIGIN only: appending a probe
+    # path to a deep final URL (…/en/index.php?x=1) would request a
+    # nonsense URL and miss a real exposed phpinfo at the root.
+    _fp = urllib.parse.urlsplit(home["final_url"])
+    base = f"{_fp.scheme}://{_fp.netloc}"
+    for path in _PHPINFO_PATHS:
+        probe = _fetch(base + path)
+        b = probe["body"]
+        if probe["status"] == 200 and "phpinfo()" in b and \
+                re.search(r"PHP Version\s*&?#?\w*\s*([0-9]+\.[0-9]+\.[0-9]+)", b):
+            vm = re.search(r"PHP Version[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)", b)
+            result["phpinfo_exposed"] = True
+            result["signals"]["phpinfo_path"] = path
+            if vm and result["php_version"] is None:
+                result["php_version"] = vm.group(1)
+                result["version_source"] = f"phpinfo ({path})"
+                raw_version_text = vm.group(0)
+            break
 
     vtuple = versioning.parse_version(result["php_version"])
     if vtuple:
