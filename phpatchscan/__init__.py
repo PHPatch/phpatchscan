@@ -1,5 +1,5 @@
 """phpatchscan — the free, open-source external PHP scanner from
-PHP Patch Service (https://phpatch.com).
+PHP Patch Assurance (https://phpatch.com).
 
 Passive fingerprinting plus limited, read-only checks of a few
 well-known paths (the phpinfo exposure probes): it reads what a

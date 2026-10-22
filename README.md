@@ -61,7 +61,7 @@ Prefer a browser? The same scan runs free at
 ## What it is not
 
 The external scan cannot see servers that hide their version. The
-full PHP Patch Service adds a read-only on-server deep check,
+full PHP Patch Assurance adds a read-only on-server deep check,
 one-click snapshot-first patching with a restore-tested safety net,
 automatic revert on failure, verified rollback, and a work report with a SHA-256
 integrity hash: [phpatch.com](https://phpatch.com).
