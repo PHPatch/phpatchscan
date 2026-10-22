@@ -5,6 +5,11 @@ It answers one question about any public website: **is its PHP
 runtime below the fixed release for a known critical advisory**
 (starting with php2shell, CVE-2026-109618 / CVE-2026-109619)?
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Dependencies: zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#what-it-does)
+[![Tests](https://github.com/PHPatch/phpatchscan/actions/workflows/tests.yml/badge.svg)](https://github.com/PHPatch/phpatchscan/actions/workflows/tests.yml)
+
 ## What it does
 
 - **Passive fingerprinting plus limited path checks.** It reads response headers,
@@ -25,6 +30,26 @@ runtime below the fixed release for a known critical advisory**
   so it cannot be pointed at internal services. The refusals are
   exercised by the test suite in `tests/` on every push.
 - **Zero dependencies.** Python 3.11+ standard library only.
+
+## How it compares
+
+The php2shell scanners that appeared in October 2026 differ
+mostly in **how they decide you are vulnerable** — and in whether
+they try to trigger the bug to find out:
+
+| Tool | Detection | Sends exploit triggers? | Remediation | License |
+|---|---|---|---|---|
+| **phpatchscan** (this repo) | Version fingerprint from what the site discloses; says "version hidden" instead of guessing | **No — never** | Via [PHP Patch Assurance](https://phpatch.com): snapshot-first patch, verify, rollback, evidence report | MIT |
+| OpenAI php2shell-checker | Version fingerprint from `X-Powered-By` / `Server` headers only | No | None | Apache-2.0 |
+| Searchlight Cyber php2shell-scanner | Behavioral — crafted multipart probes force PHP out of memory and watch for the crash | **Yes, deliberately** | None | No LICENSE file |
+| SamJUK php2shell-check | Behavioral, local — observes how the installed PHP binary terminates at its memory limit | Only against a throwaway local CLI process | None | MIT |
+| squiblyza php_vuln_scan | Version fingerprint from headers/markup, plus version-disclosure hunting | No | None | MIT |
+| JoasASantos php2shell-scanner | Version fingerprint + subdomain recon + origin scan | Optional opt-in probe (README warns of DoS risk) | None | README states MIT; no LICENSE file |
+
+Full criteria, the fairness notes (behavioral checks catch
+backports; crash signals also misfire on some patched builds),
+SSRF-safety comparison and an FAQ:
+**[PHP vulnerability scanners compared](https://phpatch.com/compare)**.
 
 ## Install
 
