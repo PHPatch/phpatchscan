@@ -28,7 +28,19 @@ runtime below the fixed release for a known critical advisory**
 
 ## Run it
 
+Install from the zip (or from a clone of this repo), then run it
+from anywhere:
+
 ```bash
+python3 -m pip install phpatchscan.zip
+python3 -m phpatchscan https://your-site.com
+```
+
+Or skip installing: unzip, step into the folder, and run it there:
+
+```bash
+unzip phpatchscan.zip
+cd phpatchscan
 python3 -m phpatchscan https://your-site.com
 ```
 
