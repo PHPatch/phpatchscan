@@ -228,6 +228,20 @@ distribution build (Ubuntu/Debian packages) is a "check" signal,
 not proof: distros backport fixes without changing the upstream
 version, and the scanner says so when it detects a distro build.
 
+## Support the project
+
+phpscan is free and MIT-licensed, and the hosted scanner at
+[phpatch.com](https://phpatch.com) is free for every site. If
+the scanner, the threat desk or the daily Mega-Vuln Alert
+reports helped you, you can chip in at
+**[phpatch.com/donate](https://phpatch.com/donate)** — any
+amount from $1, one-time, via Stripe. Donations fund phpscan
+development, the free hosted scans and the public threat
+research. Plainly stated on the page: PHPatch is operated by
+Superstar Telecom LLC, a for-profit company, so donations are
+voluntary support — not tax-deductible, and they buy no
+product, service or entitlement.
+
 ## License
 
 MIT. Not affiliated with the PHP Group. PHP is a trademark of the
