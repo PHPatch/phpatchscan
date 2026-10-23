@@ -1,4 +1,4 @@
-"""SSRF checklist tests for the phpatchscan fetcher.
+"""SSRF checklist tests for the phpscan fetcher.
 
 Every target from the public SSRF review checklist (2026-10-22)
 is a named case here. Tests are hermetic: the resolver and the
@@ -15,8 +15,8 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-from phpatchscan import __main__ as cli
-from phpatchscan import scan, versioning
+from phpscan import __main__ as cli
+from phpscan import scan, versioning
 
 PUBLIC = "93.184.216.34"
 META = "169.254.169.254"
@@ -576,7 +576,7 @@ class DripTests(unittest.TestCase):
 
 
 class CliExitCodes(unittest.TestCase):
-    """Exit-code contract (see phpatchscan/__main__.py and the
+    """Exit-code contract (see phpscan/__main__.py and the
     README): 0 clean, 1 actionable, 2 usage error or a target
     the scanner could not judge at all — unreachable, or
     not_assessed (branch newer than the advisory database)."""

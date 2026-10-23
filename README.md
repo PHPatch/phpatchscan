@@ -1,6 +1,6 @@
-# phpatchscan — free open-source PHP vulnerability scanner
+# phpscan — free open-source PHP vulnerability scanner
 
-**Is your PHP version vulnerable to php2shell?** phpatchscan is a
+**Is your PHP version vulnerable to php2shell?** phpscan is a
 free, disclosure-only scanner that answers that question for any
 public website. It checks the PHP version a site discloses against
 the fixed releases for **php2shell — CVE-2026-109618 /
@@ -13,7 +13,7 @@ It is the open-source scanner behind [phpatch.com](https://phpatch.com).
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Dependencies: zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#what-it-does)
-[![Tests](https://github.com/PHPatch/phpatchscan/actions/workflows/tests.yml/badge.svg)](https://github.com/PHPatch/phpatchscan/actions/workflows/tests.yml)
+[![Tests](https://github.com/PHPatch/phpscan/actions/workflows/tests.yml/badge.svg)](https://github.com/PHPatch/phpscan/actions/workflows/tests.yml)
 
 ## What it does
 
@@ -60,7 +60,7 @@ Recorded against a local test fixture that discloses
 tool prints:
 
 ```console
-$ python3 -m phpatchscan http://fixture.example
+$ python3 -m phpscan http://fixture.example
 {
  "target": "http://fixture.example",
  "reachable": true,
@@ -118,15 +118,15 @@ it is VULNERABLE (or POSSIBLY VULNERABLE for distro builds):
 | 8.5 | **8.5.12** |
 | < 8.2 | No fix — **END OF LIFE** (branch upgrade or offline) |
 
-The floors live in `phpatchscan/data/cves.json`, reviewed against
+The floors live in `phpscan/data/cves.json`, reviewed against
 the php.net release announcements on every PHP security release
 (see [Advisory data](#advisory-data)).
 
 ## Install
 
 ```bash
-git clone https://github.com/PHPatch/phpatchscan.git
-cd phpatchscan
+git clone https://github.com/PHPatch/phpscan.git
+cd phpscan
 # Python 3.11+ standard library only — no pip install, no dependencies.
 ```
 
@@ -135,23 +135,23 @@ cd phpatchscan
 From the clone, run it right there — no install step:
 
 ```bash
-python3 -m phpatchscan https://your-site.com
+python3 -m phpscan https://your-site.com
 ```
 
-Prefer a zip? Download `phpatchscan.zip` from phpatch.com, then
+Prefer a zip? Download `phpscan.zip` from phpatch.com, then
 either install it and run from anywhere:
 
 ```bash
-python3 -m pip install phpatchscan.zip
-python3 -m phpatchscan https://your-site.com
+python3 -m pip install phpscan.zip
+python3 -m phpscan https://your-site.com
 ```
 
 or unzip and run in place:
 
 ```bash
-unzip phpatchscan.zip
-cd phpatchscan
-python3 -m phpatchscan https://your-site.com
+unzip phpscan.zip
+cd phpscan
+python3 -m phpscan https://your-site.com
 ```
 
 Output is one JSON object per URL: the verdict, the disclosed PHP
@@ -176,7 +176,7 @@ they try to trigger the bug to find out:
 
 | Tool | Detection | Sends exploit triggers? | Remediation | License |
 |---|---|---|---|---|
-| **phpatchscan** (this repo) | Version fingerprint from what the site discloses; says "version hidden" instead of guessing | **No — never** | Via [PHP Patch Assurance](https://phpatch.com): snapshot-first patch, verify, rollback, evidence report | MIT |
+| **phpscan** (this repo) | Version fingerprint from what the site discloses; says "version hidden" instead of guessing | **No — never** | Via [PHP Patch Assurance](https://phpatch.com): snapshot-first patch, verify, rollback, evidence report | MIT |
 | OpenAI php2shell-checker | Version fingerprint from `X-Powered-By` / `Server` headers only | No | None | Apache-2.0 |
 | Searchlight Cyber php2shell-scanner | Behavioral — crafted multipart probes force PHP out of memory and watch for the crash | **Yes, deliberately** | None | No LICENSE file |
 | SamJUK php2shell-check | Behavioral, local — observes how the installed PHP binary terminates at its memory limit | Only against a throwaway local CLI process | None | MIT |
@@ -212,7 +212,7 @@ opt-out blocklist for site operators (see the Terms, section 8).
 
 ## Advisory data
 
-`phpatchscan/data/cves.json` is the advisory database the scanner
+`phpscan/data/cves.json` is the advisory database the scanner
 judges against — branch floors, fixed releases, references and the
 leak/exploitation timeline. Last updated 2026-10-22. Update
 process: floors are reviewed against the php.net release

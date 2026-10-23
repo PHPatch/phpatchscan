@@ -1,4 +1,4 @@
-"""CLI: python3 -m phpatchscan <url> [more urls...]
+"""CLI: python3 -m phpscan <url> [more urls...]
 
 Prints one JSON verdict object per URL.
 

@@ -21,7 +21,7 @@ import urllib.parse
 
 from . import versioning
 
-_UA = "phpatchscan/1.4.4 (+https://phpatch.com/security)"
+_UA = "phpscan/1.4.4 (+https://phpatch.com/security)"
 _TIMEOUT = 12
 _MAX_BODY = 512 * 1024
 _MAX_REDIRECTS = 5

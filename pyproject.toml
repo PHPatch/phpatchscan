@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "phpatchscan"
+name = "phpscan"
 version = "1.4.4"
 description = "Free external PHP vulnerability scanner (php2shell / CVE-2026-109618, CVE-2026-109619) — passive fingerprinting plus limited, read-only path checks. No exploit probes."
 readme = "README.md"
@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Superstar Telecom LLC" }]
 
 [tool.setuptools]
-packages = ["phpatchscan"]
+packages = ["phpscan"]
 
 [tool.setuptools.package-data]
-phpatchscan = ["data/*.json"]
+phpscan = ["data/*.json"]

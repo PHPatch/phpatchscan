@@ -1,4 +1,4 @@
-"""phpatchscan — the free, open-source external PHP scanner from
+"""phpscan — the free, open-source external PHP scanner from
 PHP Patch Assurance (https://phpatch.com).
 
 Passive fingerprinting plus limited, read-only checks of a few
